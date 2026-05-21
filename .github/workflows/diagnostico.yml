@@ -17,4 +17,4 @@ jobs:
             any::jsonlite
             any::readr
             any::dplyr
-      - run: Rscript diagnostico2.R
+      - run: Rscript diagnostico3.R
