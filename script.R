@@ -12,9 +12,11 @@
 # Justificativas das escolhas de fonte:
 #   - FRED via fredgraph.csv: endpoint público, sem chave de API.
 #     Uso download.file() porque httr tem bug intermitente com HTTP/2 do FRED.
-#   - SIDRA tabela 8159 para Brasil PIM-PF: traz "Indústria geral" e
-#     desagregação por seção da CNAE 2.0 com índice SA e NSA (variáveis
-#     11600 e 11599 respectivamente).
+#   - SIDRA tabela 8888 para Brasil PIM-PF: é a versão corrente da PIM-PF
+#     (base 2022=100), substituiu a 8159 (que ficou descontinuada em
+#     dez/2022). Cobre de jan/2002 até hoje. Variáveis:
+#       12606 = Número-índice (NSA)
+#       12607 = Número-índice com ajuste sazonal (SA)
 #   - Selic SGS 4189 (acumulada anualizada base 252): é taxa efetiva
 #     realizada, comparável ao Fed Funds Effective Rate.
 ###############################################################################
@@ -25,8 +27,6 @@
 rm(list = ls())
 
 tryCatch(Sys.setlocale("LC_ALL", "C.UTF-8"), warning = function(w) NULL)
-
-# Faz warnings aparecerem imediatamente no log (em vez de empilhar no fim)
 options(warn = 1)
 
 pacotes <- c("dplyr", "tidyr", "purrr", "readr", "stringr",
@@ -170,22 +170,25 @@ sgs_serie <- function(codigo) {
 
 ## --- 5. IBGE / SIDRA --------------------------------------------------------
 
-sidra_8159 <- function() {
-  url <- "https://apisidra.ibge.gov.br/values/t/8159/n1/all/v/all/p/all"
+# Tabela 8888 (PIM-PF atual, base 2022=100):
+#   v=12606 — Número-índice (NSA)
+#   v=12607 — Número-índice com ajuste sazonal (SA)
+
+sidra_8888 <- function() {
+  url <- "https://apisidra.ibge.gov.br/values/t/8888/n1/all/v/all/p/all"
   txt <- http_pegar(url, timeout_s = 180)
-  if (is.null(txt)) { warning("SIDRA: falha em 8159", immediate. = TRUE); return(NULL) }
+  if (is.null(txt)) { warning("SIDRA: falha em 8888", immediate. = TRUE); return(NULL) }
 
   raw <- tryCatch(jsonlite::fromJSON(txt), error = function(e) NULL)
   if (is.null(raw) || nrow(raw) < 2) {
-    warning("SIDRA: 8159 sem dados", immediate. = TRUE); return(NULL)
+    warning("SIDRA: 8888 sem dados", immediate. = TRUE); return(NULL)
   }
 
   rotulos <- as.character(raw[1, ])
   dados   <- as_tibble(raw[-1, , drop = FALSE])
   names(dados) <- rotulos
 
-  cat("    SIDRA 8159: linhas brutas =", nrow(dados), "\n")
-  cat("    colunas:", paste(names(dados), collapse = " | "), "\n")
+  cat("    SIDRA 8888: linhas brutas =", nrow(dados), "\n")
 
   col_mes  <- "Mês (Código)"
   col_var  <- "Variável (Código)"
@@ -213,16 +216,17 @@ sidra_8159 <- function() {
     drop_na(data, valor) |>
     filter(data >= INICIO_BUSCA, data <= FIM_BUSCA)
 
-  cat("    SIDRA 8159 limpo:", nrow(out), "obs\n")
-  cat("    valores únicos de v_cod:", paste(unique(out$v_cod), collapse = ", "), "\n")
-  cat("    primeiras seções:", paste(head(unique(out$secao), 5), collapse = " | "), "\n")
+  cat("    SIDRA 8888 limpo:", nrow(out), "obs\n")
+  cat("    cobertura:",
+      format(min(out$data)), "a", format(max(out$data)), "\n")
   out
 }
 
 
+# Códigos da tabela 8888: 12607 = SA, 12606 = NSA
 sa_ou_nsa <- function(v_cod) {
-  if_else(v_cod == "11600", "SA",
-  if_else(v_cod == "11599", "NSA",
+  if_else(v_cod == "12607", "SA",
+  if_else(v_cod == "12606", "NSA",
                             "OUTRO"))
 }
 
@@ -242,9 +246,6 @@ mensal_fim <- function(df) {
 
 ## --- 7. Pipeline ------------------------------------------------------------
 
-# Helper que une uma série numérica única com nome dado em formato data+nome.
-# Se a série for NULL ou vazia, retorna um tibble com a coluna nomeada vazia
-# (e a coluna 'data' presente) — assim o full_join nunca falha.
 preparar_serie <- function(d, nome_coluna) {
   if (is.null(d) || nrow(d) == 0) {
     return(tibble(data = as.Date(character()), !!nome_coluna := numeric()))
@@ -263,8 +264,8 @@ cat("  FRED FEDFUNDS\n");  eua_juros  <- mensal_fim(fred_serie("FEDFUNDS"))
 cat("  SGS 4189 (Selic anualizada)\n")
 br_juros <- mensal_fim(sgs_serie(4189))
 
-cat("  SIDRA 8159 (PIM-PF por seção CNAE 2.0)\n")
-sidra <- sidra_8159()
+cat("  SIDRA 8888 (PIM-PF atual, base 2022=100)\n")
+sidra <- sidra_8888()
 
 
 ## --- 8. Painéis wide --------------------------------------------------------
@@ -315,8 +316,6 @@ if (is.null(sidra) || nrow(sidra) == 0) {
   cat("  BR seções:", nrow(br_secoes), "linhas\n")
 }
 
-# Garante que br_ind_geral tem as colunas esperadas mesmo se uma das
-# variáveis (SA ou NSA) faltou no SIDRA
 if (!"ind_prod_sa"  %in% names(br_ind_geral)) br_ind_geral$ind_prod_sa  <- NA_real_
 if (!"ind_prod_nsa" %in% names(br_ind_geral)) br_ind_geral$ind_prod_nsa <- NA_real_
 
@@ -331,12 +330,8 @@ cat("  Brasil:", nrow(brasil), "linhas\n")
 
 primeiro_se_existe <- function(df, col) {
   if (is.null(df) || nrow(df) == 0) return(NA)
-  if (!is.null(col)) {
-    v <- df[[col]]
-    d <- df$data[!is.na(v)]
-  } else {
-    d <- df$data
-  }
+  v <- df[[col]]
+  d <- df$data[!is.na(v)]
   if (length(d) == 0) NA else min(d)
 }
 
