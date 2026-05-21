@@ -1,5 +1,0 @@
-base,variavel,ajuste_sazonal,fonte,codigo,observacoes,data_inicial,data_final,media,mediana,desvio_padrao,minimo,maximo
-Brasil - Produção industrial por categoria de uso,PIMPF - Número-índice (2012=100),Não ajustada sazonalmente,IBGE/SIDRA,8158,5676,2002-01-01,2022-12-01,8992676.618393235,9051148.5,1902075.0369615422,8324,16619142
-Brasil - Produção industrial por categoria de uso,PIMPF - Número-índice com ajuste sazonal (2012=100),Ajustada sazonalmente,IBGE/SIDRA,8158,1260,2002-01-01,2022-12-01,8851632.162698412,9000035.5,1293507.6216378682,1594126,12024904
-Brasil - Produção industrial por setores,PIMPF - Número-índice (2012=100),Não ajustada sazonalmente,IBGE/SIDRA,8159,6816,2002-01-01,2022-12-01,9115037.184712442,9126743,2041082.6861126244,672973,23590124
-Brasil - Produção industrial por setores,PIMPF - Número-índice com ajuste sazonal (2012=100),Ajustada sazonalmente,IBGE/SIDRA,8159,6816,2002-01-01,2022-12-01,9114078.039612677,9221678,1652582.7019822185,962083,16297198
