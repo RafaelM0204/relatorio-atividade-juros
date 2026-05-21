@@ -11,10 +11,10 @@
 #
 # Justificativas das escolhas de fonte:
 #   - FRED via fredgraph.csv: endpoint público, sem chave de API.
-#     Uso download.file() porque httr tem bug intermitente com HTTP/2 do FRED.
-#   - SIDRA tabela 8888 para Brasil PIM-PF: é a versão corrente da PIM-PF
-#     (base 2022=100), substituiu a 8159 (que ficou descontinuada em
-#     dez/2022). Cobre de jan/2002 até hoje. Variáveis:
+#     Uso curl com HTTP/1.1 forçado pois o servidor do FRED tem bug
+#     intermitente quando o cliente negocia HTTP/2.
+#   - SIDRA tabela 8888 para Brasil PIM-PF: versão corrente da PIM-PF
+#     (base 2022=100), cobre jan/2002 até hoje. Variáveis:
 #       12606 = Número-índice (NSA)
 #       12607 = Número-índice com ajuste sazonal (SA)
 #   - Selic SGS 4189 (acumulada anualizada base 252): é taxa efetiva
@@ -31,7 +31,7 @@ options(warn = 1)
 
 pacotes <- c("dplyr", "tidyr", "purrr", "readr", "stringr",
              "lubridate", "ggplot2", "patchwork",
-             "httr", "jsonlite", "openxlsx")
+             "httr", "jsonlite", "openxlsx", "curl")
 
 for (p in pacotes) {
   if (!requireNamespace(p, quietly = TRUE)) {
@@ -85,36 +85,41 @@ http_pegar <- function(url, timeout_s = 60) {
 
 ## --- 3. FRED ----------------------------------------------------------------
 
+# Uso curl::curl_fetch_memory com handle customizado forçando HTTP/1.1.
+# O servidor do FRED tem bug com HTTP/2; tanto httr quanto download.file
+# falham por padrão. CURLOPT_HTTP_VERSION = 2 (CURL_HTTP_VERSION_1_1) força
+# o cliente a não negociar HTTP/2.
+
+CURL_HTTP_VERSION_1_1 <- 2L
+
 fred_serie <- function(id_serie) {
   url <- paste0("https://fred.stlouisfed.org/graph/fredgraph.csv?id=", id_serie)
-  arq_tmp <- tempfile(fileext = ".csv")
 
-  ok <- FALSE
+  resp <- NULL
   for (k in 1:3) {
-    res <- tryCatch(
-      utils::download.file(url, arq_tmp, quiet = TRUE,
-                           method = "libcurl",
-                           headers = c(`User-Agent` = UA)),
-      error = function(e) { cat("    download erro:", conditionMessage(e), "\n"); -1 }
-    )
-    if (res == 0 && file.exists(arq_tmp) && file.size(arq_tmp) > 0) {
-      ok <- TRUE; break
-    }
-    Sys.sleep(3 * k)
+    h <- curl::new_handle()
+    curl::handle_setopt(h,
+                        useragent    = UA,
+                        timeout      = 120,
+                        http_version = CURL_HTTP_VERSION_1_1)
+    resp <- tryCatch(curl::curl_fetch_memory(url, handle = h),
+                     error = function(e) {
+                       cat("    curl erro:", conditionMessage(e), "\n"); NULL
+                     })
+    if (!is.null(resp) && resp$status_code == 200 && length(resp$content) > 0) break
+    Sys.sleep(3 * k); resp <- NULL
   }
 
-  if (!ok) {
+  if (is.null(resp)) {
     warning("FRED: falha em ", id_serie, immediate. = TRUE)
     return(NULL)
   }
 
+  txt <- rawToChar(resp$content)
   df <- tryCatch(
-    readr::read_csv(arq_tmp, na = c(".", "NA", ""), show_col_types = FALSE),
-    error = function(e) {
-      cat("    read_csv erro:", conditionMessage(e), "\n"); NULL
-    }
+    readr::read_csv(I(txt), na = c(".", "NA", ""), show_col_types = FALSE),
+    error = function(e) { cat("    read_csv erro:", conditionMessage(e), "\n"); NULL }
   )
-  unlink(arq_tmp)
   if (is.null(df) || nrow(df) == 0) {
     warning("FRED: ", id_serie, " sem dados", immediate. = TRUE)
     return(NULL)
@@ -170,9 +175,15 @@ sgs_serie <- function(codigo) {
 
 ## --- 5. IBGE / SIDRA --------------------------------------------------------
 
-# Tabela 8888 (PIM-PF atual, base 2022=100):
-#   v=12606 — Número-índice (NSA)
-#   v=12607 — Número-índice com ajuste sazonal (SA)
+# Função para converter "YYYYMM" em Date (último dia do mês).
+# Mantida separada para clareza e para evitar bug do pipe |> dentro de transmute.
+yyyymm_para_fim_mes <- function(s) {
+  ano <- substr(s, 1, 4)
+  mes <- substr(s, 5, 6)
+  d <- suppressWarnings(lubridate::ymd(paste0(ano, "-", mes, "-01")))
+  # ceiling_date("month") - days(1) = último dia do mês
+  lubridate::ceiling_date(d, "month") - lubridate::days(1)
+}
 
 sidra_8888 <- function() {
   url <- "https://apisidra.ibge.gov.br/values/t/8888/n1/all/v/all/p/all"
@@ -203,22 +214,35 @@ sidra_8888 <- function() {
     return(NULL)
   }
 
-  out <- dados |>
-    transmute(
-      data = lubridate::ymd(paste0(substr(.data[[col_mes]], 1, 4), "-",
-                                   substr(.data[[col_mes]], 5, 6), "-01")) |>
-             lubridate::ceiling_date("month") - 1,
-      v_cod  = .data[[col_var]],
-      v_nome = .data[[col_vnom]],
-      secao  = .data[[col_sec]],
-      valor  = suppressWarnings(as.numeric(.data[[col_val]]))
-    ) |>
+  # Conversões em passos separados para facilitar diagnóstico
+  cat("    primeiras amostras antes do parse:\n")
+  cat("      Mês (Código):", paste(head(unique(dados[[col_mes]]), 5), collapse=", "), "\n")
+  cat("      Valor:", paste(head(dados[[col_val]], 5), collapse=", "), "\n")
+  cat("      Variável (Código):", paste(head(unique(dados[[col_var]]), 5), collapse=", "), "\n")
+
+  dados$.data_fim <- yyyymm_para_fim_mes(dados[[col_mes]])
+  dados$.valor    <- suppressWarnings(as.numeric(dados[[col_val]]))
+
+  cat("    após parse:\n")
+  cat("      data não-NA:", sum(!is.na(dados$.data_fim)), "/", nrow(dados), "\n")
+  cat("      valor não-NA:", sum(!is.na(dados$.valor)),    "/", nrow(dados), "\n")
+
+  out <- tibble(
+    data   = dados$.data_fim,
+    v_cod  = dados[[col_var]],
+    v_nome = dados[[col_vnom]],
+    secao  = dados[[col_sec]],
+    valor  = dados$.valor
+  ) |>
     drop_na(data, valor) |>
     filter(data >= INICIO_BUSCA, data <= FIM_BUSCA)
 
   cat("    SIDRA 8888 limpo:", nrow(out), "obs\n")
-  cat("    cobertura:",
-      format(min(out$data)), "a", format(max(out$data)), "\n")
+  if (nrow(out) > 0) {
+    cat("    cobertura:",
+        format(min(out$data)), "a", format(max(out$data)), "\n")
+    cat("    códigos de variável:", paste(sort(unique(out$v_cod)), collapse = ", "), "\n")
+  }
   out
 }
 
@@ -236,7 +260,7 @@ sa_ou_nsa <- function(v_cod) {
 mensal_fim <- function(df) {
   if (is.null(df) || nrow(df) == 0) return(df)
   df |>
-    mutate(fim_mes = lubridate::ceiling_date(data, "month") - 1) |>
+    mutate(fim_mes = lubridate::ceiling_date(data, "month") - lubridate::days(1)) |>
     group_by(fim_mes) |>
     summarise(valor = last(valor), .groups = "drop") |>
     rename(data = fim_mes) |>
