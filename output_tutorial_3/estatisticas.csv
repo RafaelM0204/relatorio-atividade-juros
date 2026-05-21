@@ -1,0 +1,7 @@
+pais,serie,n,media,dp,min,p25,p50,p75,max
+EUA,ind_prod_sa,0,,,,,,,
+EUA,ind_prod_nsa,0,,,,,,,
+EUA,fed_funds,0,,,,,,,
+Brasil,ind_prod_sa,0,,,,,,,
+Brasil,ind_prod_nsa,0,,,,,,,
+Brasil,selic,317,12.329085173501577,4.878746543050798,1.9,9.15,12.17,14.9,26.32
