@@ -31,9 +31,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.R_LIBS_USER }}
-          key: ${{ runner.os }}-rpkgs-${{ hashFiles('script.R') }}
+          key: ${{ runner.os }}-rpkgs-v2-${{ hashFiles('script.R') }}
           restore-keys: |
-            ${{ runner.os }}-rpkgs-
+            ${{ runner.os }}-rpkgs-v2-
 
       - name: Instalar dependências do sistema
         run: |
@@ -48,10 +48,11 @@ jobs:
           packages: |
             any::tidyverse
             any::lubridate
-            any::httr
-            any::jsonlite
+            any::patchwork
             any::openxlsx
-            any::scales
+            any::quantmod
+            any::rbcb
+            any::sidrar
 
       - name: Rodar script
         run: Rscript script.R
