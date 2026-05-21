@@ -1,0 +1,72 @@
+name: Relatório Mensal de Atividade e Juros
+
+on:
+  schedule:
+    # 12:00 UTC dia 5 = 09:00 horário de Brasília
+    - cron: "0 12 5 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.4"
+          use-public-rspm: true
+
+      - name: Cache de pacotes R
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: ${{ runner.os }}-rpkgs-${{ hashFiles('script.R') }}
+          restore-keys: |
+            ${{ runner.os }}-rpkgs-
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev \
+                                  libfontconfig1-dev libfreetype6-dev libpng-dev \
+                                  libtiff5-dev libjpeg-dev
+
+      - name: Instalar pacotes R
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::tidyverse
+            any::lubridate
+            any::httr
+            any::jsonlite
+            any::openxlsx
+            any::scales
+
+      - name: Rodar script
+        run: Rscript script.R
+
+      - name: Commitar resultados no repositório
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A output_tutorial_3
+          git diff --staged --quiet || git commit -m "Relatório $(date +%Y-%m)"
+          git push
+
+      - name: Disponibilizar para download (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-${{ github.run_number }}
+          path: output_tutorial_3/
+          retention-days: 90
