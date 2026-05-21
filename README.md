@@ -1,107 +1,101 @@
-# Acompanhamento de Atividade e Juros — Brasil e EUA
+# Relatório mensal de atividade e juros (Brasil e EUA)
 
-Robô que produz mensalmente um relatório com indicadores macroeconômicos de produção industrial e juros de curto prazo para Brasil e EUA. Roda na nuvem do GitHub e não exige nenhum computador ligado: no dia 5 de cada mês, às 9h (horário de Brasília), os dados são baixados, processados e os arquivos atualizados são publicados de volta no repositório.
+Projeto do Tutorial 3 da disciplina Programação e Resolução de Problemas (EESP-FGV, 1º sem/2026).
 
-## Indicadores e fontes
+Robô que produz, todo dia 5 de cada mês, um conjunto de tabelas e gráficos com indicadores de produção industrial e juros de curto prazo para Brasil e Estados Unidos. Não exige nenhum computador ligado: tudo roda na infraestrutura gratuita do GitHub Actions.
 
-| País | Indicador | Fonte | Código |
-|------|-----------|-------|--------|
-| EUA | Produção industrial (SA) | FRED | `INDPRO` |
-| EUA | Produção industrial (NSA) | FRED | `IPB50001N` |
-| EUA | Federal Funds Effective Rate | FRED | `FEDFUNDS` |
-| Brasil | Produção industrial — Indústria geral (SA e NSA) | IBGE/SIDRA | tabela `8159` |
-| Brasil | Produção industrial — por categoria de uso | IBGE/SIDRA | tabela `8158` |
-| Brasil | Selic acumulada no mês — anualizada base 252 | BCB/SGS | `4189` |
-
-**Por que essas fontes específicas:**
-
-- **FRED via `fredgraph.csv`** (e não a API JSON): o endpoint público de CSV não exige chave de API. Tira o `FRED_API_KEY` da lista de segredos a gerenciar, simplificando o workflow.
-- **IBGE/SIDRA via API** (e não BCB/SGS para PIM-PF): o SIDRA traz metadados ricos (nome da variável, categoria de uso, setor), permitindo a desagregação que o tutorial pede. O BCB/SGS expõe apenas pontos da série sem rótulos.
-- **Selic SGS 4189 (acumulada anualizada, base 252)** — e não SGS 432 (meta): para comparar com o `FEDFUNDS` effective rate é mais correto usar uma taxa **efetivamente realizada** do que a taxa-meta do Copom.
-
-## Arquitetura
-
-Três componentes no repositório:
+## Indicadores
 
 ```
-.
-├── script.R                       # baixa, processa, exporta
-├── .github/workflows/relatorio.yml # quando e como rodar
-└── output_tutorial_3/             # outputs gerados (commitados a cada run)
+Brasil
+  Produção industrial — Indústria geral (SA e NSA)   IBGE/SIDRA, tabela 8159
+  Produção industrial — categorias de uso            IBGE/SIDRA, tabela 8158
+  Selic acumulada anualizada base 252                BCB/SGS, série 4189
+
+EUA
+  Industrial Production Index (SA)                   FRED, INDPRO
+  Industrial Production Index (NSA)                  FRED, IPB50001N
+  Federal Funds Effective Rate                       FRED, FEDFUNDS
 ```
 
-**Fluxo:**
+## Por que essas fontes específicas
 
-1. GitHub Actions é acionado (agendamento mensal ou botão `workflow_dispatch`).
-2. Uma VM Ubuntu é criada com R 4.4.
-3. Pacotes R são instalados (cache reutilizado entre runs).
-4. `script.R` roda: baixa FRED + BCB/SGS + IBGE/SIDRA, processa, gera CSVs/XLSX/PNG.
-5. Arquivos são commitados em `output_tutorial_3/`.
-6. Os mesmos arquivos ficam disponíveis como _artifact_ do run por 90 dias.
+**FRED via endpoint público `fredgraph.csv`** em vez da API JSON.
+O endpoint de CSV não exige chave de API. Isso remove a necessidade de configurar um *Secret* no GitHub e simplifica o workflow.
 
-## Estrutura do `script.R`
+**IBGE/SIDRA para a produção industrial brasileira** em vez do BCB/SGS.
+O SIDRA expõe metadados que o SGS não tem: nome da variável (que distingue SA de NSA), categoria de uso, setor de atividade. Isso permite a desagregação por categoria de uso que o enunciado do tutorial pede.
 
-Dividido em blocos:
+**Selic SGS 4189 (acumulada anualizada base 252)** em vez da Selic-meta (SGS 432).
+A SGS 4189 é a taxa **efetivamente realizada** no mercado; o `FEDFUNDS` do FRED também é uma taxa efetiva. Comparar realizada com realizada faz mais sentido do que comparar meta com efetiva.
 
-- **`.get(url)`** — wrapper resiliente: até 3 tentativas com backoff crescente, retorna `NULL` em vez de quebrar. Falha rápido em 401/403/404.
-- **`baixar_fred(codigo, nome)`** — endpoint `fredgraph.csv` (sem chave).
-- **`baixar_bcb_sgs(codigo, nome)`** — `api.bcb.gov.br/dados/serie/bcdata.sgs`; **quebra a janela em pedaços de 10 anos** para evitar timeout da API com históricos longos.
-- **`baixar_sidra(api_path, ...)`** — `apisidra.ibge.gov.br/values`; promove a 1ª linha do JSON como rótulos amigáveis das colunas.
-- **`padronizar_sidra(...)`** — extrai data do código de período (suporta `YYYYMM`, `YYYY/MM`, `YYYY-MM`), parseia valores com vírgula decimal.
-- **`classificar_ajuste_sazonal(var)`** — detecta SA vs NSA pelo texto da variável.
-- **`gerar_estatisticas(...)`** — média, mediana, desvio, min, max, observações, período.
-- **`calcular_comparacao_ajuste(...)`** — correlação SA×NSA, diferença média/std/min/max em nível e em percentual.
-- **`salvar_grafico(...)`** — `ggplot2` + tema profissional + paleta consistente.
-- **`main()`** — orquestra tudo e detecta o **primeiro mês em que todas as séries-base têm dado**, recortando o histórico nesse ponto.
+## O que sai
 
-## Outputs gerados (`output_tutorial_3/`)
+Pasta `output_tutorial_3/`:
 
-| Arquivo | Conteúdo |
-|---------|----------|
-| `relatorio_tutorial_3.xlsx` | Excel com 13 abas (tudo num único arquivo) |
-| `producao_industrial_eua.csv` | Série EUA (SA + NSA), formato long |
-| `producao_industrial_brasil.csv` | Brasil — todas as variáveis (índice geral + categorias + setores) |
-| `producao_industrial_brasil_industria_geral.csv` | Brasil — apenas índice geral |
-| `juros_brasil_eua.csv` | Selic + FedFunds |
-| `producao_comparativa_brasil_eua.csv` | EUA + Brasil em base 100 |
-| `estatisticas_*.csv` | Estatísticas descritivas |
-| `comparacao_*_ajuste_sazonal.csv` | Mês a mês: SA, NSA, diferença em nível e % |
-| `estatisticas_diferenca_*.csv` | Resumo da comparação SA×NSA |
-| `diagnostico_variaveis_brasil.csv` | Lista de todas as variáveis detectadas |
-| `grafico_producao_eua.png` | EUA: SA vs NSA |
-| `grafico_juros_brasil_eua.png` | Selic vs FedFunds |
-| `grafico_producao_brasil_industria_geral.png` | Brasil: SA vs NSA |
-| `grafico_producao_brasil_eua.png` | Brasil × EUA em base 100 |
+```
+eua.csv                          Painel mensal EUA: 3 colunas (SA, NSA, FedFunds)
+brasil.csv                       Painel mensal Brasil: 3 colunas (SA, NSA, Selic)
+brasil_categorias_uso.csv        PIM-PF brasileira em formato longo
+estatisticas.csv                 Estatísticas descritivas (1 linha por série)
+comparacao_sa_nsa_resumo.csv     Resumo da comparação ajustada x não-ajustada
+comparacao_sa_nsa_serie.csv      Diferença SA - NSA mês a mês
+painel_atividade_juros.png       Painel 2×2 com as 4 séries principais
+diferenca_sa_nsa.png             Magnitude da sazonalidade ao longo do tempo
+relatorio_atividade_juros.xlsx   Todos os CSVs num único arquivo, em abas
+```
 
-## Como configurar o repositório
+## Como o código está organizado
 
-1. Criar repo público (ou privado) no GitHub.
-2. Subir `script.R` na raiz e `relatorio.yml` em `.github/workflows/`.
-3. **Não é necessário** configurar nenhum _Secret_ (o `fredgraph.csv` é público).
-4. Habilitar Actions em Settings → Actions → General → Allow all actions.
-5. Settings → Actions → General → Workflow permissions → marcar "Read and write permissions" (necessário para o passo de commit).
-6. Para testar imediatamente: aba Actions → "Relatório Mensal de Atividade e Juros" → botão **Run workflow**.
+`script.R` é dividido em seções numeradas. Cada uma tem uma única responsabilidade:
+
+0. Setup de pacotes e locale.
+1. Parâmetros: janela de busca, pasta de saída.
+2. `http_pegar()` — wrapper sobre `httr::GET` com 3 tentativas e backoff (3s, 6s, 9s). Em 401/403/404 desiste imediato; em 5xx ou timeout, tenta de novo. Retorna `NULL` em vez de quebrar.
+3. `fred_serie()` — leitor de `fredgraph.csv`.
+4. `sgs_serie()` — leitor do SGS com paginação de 10 anos (a API engasga com janelas longas).
+5. `sidra_serie()` + `sidra_arrumar()` — leitor do SIDRA, normaliza a tabela retornada (data como fim-de-mês, valores numéricos).
+6. `mensal_fim()` — agrega séries diárias em mensais pegando o último dia útil de cada mês.
+7. Coleta efetiva das 6 séries.
+8. Montagem dos painéis wide (`eua` e `brasil`) e do formato longo (`br_categorias`).
+9. Recorte do histórico para começar no primeiro mês em que todas as séries-base têm observação. A função imprime no log qual série foi a limitante.
+10. `descritivas()` — N, média, desvio, mín, quartis, mediana, máx.
+11. `compara_sa_nsa()` — correlação, diferença média/min/max, desvio da diferença, variação interanual média de cada uma.
+12. Gráficos (ggplot2 + patchwork).
+13. Exportação para CSV e XLSX.
 
 ## Como rodar localmente
 
 ```bash
-# Pré-requisito: R 4.x e pacotes
-Rscript -e 'install.packages(c("tidyverse","lubridate","httr","jsonlite","openxlsx","scales"))'
-
-# Rodar
+Rscript -e 'install.packages(c("dplyr","tidyr","purrr","readr","stringr","lubridate","ggplot2","patchwork","httr","jsonlite","openxlsx"))'
 Rscript script.R
-
-# Outputs ficam em ./output_tutorial_3/
 ```
+
+Os arquivos aparecem em `./output_tutorial_3/`.
+
+## Como o agendamento funciona
+
+`.github/workflows/relatorio.yml` define:
+
+- **Quando**: cron `0 12 5 * *` — dia 5 de cada mês, 12h UTC (= 9h de Brasília). Também aceita disparo manual pelo botão "Run workflow" na aba Actions.
+- **Onde**: VM Ubuntu 24, R 4.4, instalação de pacotes com cache entre runs.
+- **O que faz depois**: faz commit dos arquivos gerados de volta no repositório (pasta `output_tutorial_3/`) e disponibiliza o mesmo conteúdo como *artifact* do run, com retenção de 90 dias.
+
+Permissão `contents: write` é necessária no `permissions:` do workflow (e em Settings → Actions → General → Workflow permissions).
 
 ## Operação
 
-- **Status do run mensal**: aba Actions; ícone verde = sucesso, vermelho = falha. GitHub envia e-mail em caso de falha.
-- **Erros comuns**: API fora do ar (rerodar o workflow), série descontinuada (verificar código no FRED/SGS/SIDRA).
-- **Workflow agendado pode hibernar**: GitHub desativa workflows agendados após 60 dias sem atividade no repo. Reativar em Actions → Enable workflow. Qualquer commit zera esse contador.
+Status de cada execução: aba **Actions**. Verde = sucesso; vermelho = falhou em algum passo (basta clicar no run para ver o log e identificar onde quebrou). O GitHub envia e-mail automaticamente em caso de falha.
 
-## Sobre as séries
+Workflows agendados são desativados se o repositório fica 60 dias sem qualquer atividade. Para reativar: aba Actions → botão "Enable workflow". Qualquer commit zera esse contador.
 
-**Por que SA e NSA?** Séries sem ajuste (NSA) preservam a sazonalidade — útil para entender o "calendário" da produção (férias, festas, safra). Séries com ajuste (SA) removem esse padrão para mostrar a tendência subjacente — útil para comparar mês a mês a evolução genuína.
+## Notas econômicas (para incluir no relatório de entrega)
 
-**Por que isso importa no Brasil?** A correlação SA×NSA é ~0.78, indicando sazonalidade forte: a produção brasileira oscila visivelmente entre ~14% acima e ~13% abaixo da tendência ao longo do ano. Nos EUA a correlação é ~0.97 — sazonalidade muito mais sutil. Visualmente isso aparece como uma linha em "zigue-zague" no Brasil vs uma quase-reta nos EUA quando ambas são plotadas.
+A correlação entre série SA e NSA é da ordem de **0,97 para a indústria americana** e **0,78 para a brasileira**. Isso quantifica algo que aparece à vista no painel: a produção industrial brasileira tem um componente sazonal muito mais pronunciado, com oscilação mensal típica de ±7 pontos do índice contra ±1 ponto nos EUA.
+
+Hipóteses para explorar:
+- composição setorial (peso de setores sazonais como alimentos/bebidas)
+- estrutura do calendário de feriados (Carnaval, festas de fim de ano)
+- ciclos agropecuários que se transmitem para a indústria de beneficiamento
+
+A queda de COVID-19 (março–abril/2020) aparece em ambas as séries como uma descontinuidade brusca, com magnitude semelhante (~15 pontos), mas a recuperação seguiu trajetórias diferentes — útil para discutir resposta de política industrial.
