@@ -26,6 +26,9 @@ rm(list = ls())
 
 tryCatch(Sys.setlocale("LC_ALL", "C.UTF-8"), warning = function(w) NULL)
 
+# Faz warnings aparecerem imediatamente no log (em vez de empilhar no fim)
+options(warn = 1)
+
 pacotes <- c("dplyr", "tidyr", "purrr", "readr", "stringr",
              "lubridate", "ggplot2", "patchwork",
              "httr", "jsonlite", "openxlsx")
@@ -49,11 +52,7 @@ SAIDA        <- "output_tutorial_3"
 if (!dir.exists(SAIDA)) dir.create(SAIDA, recursive = TRUE)
 
 
-## --- 2. HTTP resiliente (httr) ----------------------------------------------
-
-# Usado para SGS e SIDRA. Repete até 3 vezes com backoff.
-# Para o FRED uso uma função separada com download.file() porque o httr
-# tem problema com HTTP/2 do servidor do FRED.
+## --- 2. HTTP resiliente -----------------------------------------------------
 
 UA <- "Mozilla/5.0 (relatorio-eesp-quant)"
 
@@ -64,12 +63,18 @@ http_pegar <- function(url, timeout_s = 60) {
                 httr::add_headers(`User-Agent` = UA,
                                   Accept       = "application/json, */*"),
                 httr::timeout(timeout_s)),
-      error = function(e) NULL
+      error = function(e) {
+        cat("    httr erro:", conditionMessage(e), "\n"); NULL
+      }
     )
     if (is.null(r)) { Sys.sleep(3 * k); next }
     codigo <- httr::status_code(r)
-    if (codigo %in% c(401, 403, 404))         return(NULL)
-    if (codigo >= 400)                       { Sys.sleep(3 * k); next }
+    if (codigo %in% c(401, 403, 404)) {
+      cat("    status", codigo, "- desistindo\n"); return(NULL)
+    }
+    if (codigo >= 400) {
+      cat("    status", codigo, "- tentativa", k, "\n"); Sys.sleep(3 * k); next
+    }
     corpo <- httr::content(r, as = "text", encoding = "UTF-8")
     if (is.null(corpo) || !nzchar(trimws(corpo))) return(NULL)
     return(corpo)
@@ -79,8 +84,6 @@ http_pegar <- function(url, timeout_s = 60) {
 
 
 ## --- 3. FRED ----------------------------------------------------------------
-
-# download.file() usa libcurl com HTTP/1.1 — evita o bug de HTTP/2.
 
 fred_serie <- function(id_serie) {
   url <- paste0("https://fred.stlouisfed.org/graph/fredgraph.csv?id=", id_serie)
@@ -92,7 +95,7 @@ fred_serie <- function(id_serie) {
       utils::download.file(url, arq_tmp, quiet = TRUE,
                            method = "libcurl",
                            headers = c(`User-Agent` = UA)),
-      error = function(e) -1
+      error = function(e) { cat("    download erro:", conditionMessage(e), "\n"); -1 }
     )
     if (res == 0 && file.exists(arq_tmp) && file.size(arq_tmp) > 0) {
       ok <- TRUE; break
@@ -100,25 +103,35 @@ fred_serie <- function(id_serie) {
     Sys.sleep(3 * k)
   }
 
-  if (!ok) { warning("FRED: falha em ", id_serie); return(NULL) }
+  if (!ok) {
+    warning("FRED: falha em ", id_serie, immediate. = TRUE)
+    return(NULL)
+  }
 
-  df <- readr::read_csv(arq_tmp,
-                        na = c(".", "NA", ""),
-                        show_col_types = FALSE)
+  df <- tryCatch(
+    readr::read_csv(arq_tmp, na = c(".", "NA", ""), show_col_types = FALSE),
+    error = function(e) {
+      cat("    read_csv erro:", conditionMessage(e), "\n"); NULL
+    }
+  )
   unlink(arq_tmp)
+  if (is.null(df) || nrow(df) == 0) {
+    warning("FRED: ", id_serie, " sem dados", immediate. = TRUE)
+    return(NULL)
+  }
 
   names(df) <- c("data", "valor")
-  df |>
+  out <- df |>
     mutate(data  = as.Date(data),
            valor = as.numeric(valor)) |>
     filter(data >= INICIO_BUSCA, data <= FIM_BUSCA) |>
     drop_na(valor)
+  cat("    ", id_serie, ":", nrow(out), "obs\n")
+  out
 }
 
 
 ## --- 4. BCB / SGS -----------------------------------------------------------
-
-# Paginação de 10 anos: a API engasga com janelas longas.
 
 sgs_serie <- function(codigo) {
   bordas <- seq(INICIO_BUSCA, FIM_BUSCA, by = "10 years")
@@ -140,36 +153,39 @@ sgs_serie <- function(codigo) {
   }
 
   pedacos <- compact(pedacos)
-  if (length(pedacos) == 0) { warning("SGS: falha em ", codigo); return(NULL) }
+  if (length(pedacos) == 0) {
+    warning("SGS: falha em ", codigo, immediate. = TRUE); return(NULL)
+  }
 
-  bind_rows(pedacos) |>
+  out <- bind_rows(pedacos) |>
     mutate(data  = lubridate::dmy(data),
            valor = as.numeric(stringr::str_replace(valor, ",", "."))) |>
     distinct(data, .keep_all = TRUE) |>
     arrange(data) |>
     select(data, valor)
+  cat("    SGS ", codigo, ":", nrow(out), "obs\n")
+  out
 }
 
 
 ## --- 5. IBGE / SIDRA --------------------------------------------------------
 
-# A tabela 8159 (PIM-PF mensal por seção) tem as duas variantes:
-#   v=11599 — Número-índice (NSA)
-#   v=11600 — Número-índice com ajuste sazonal (SA)
-
 sidra_8159 <- function() {
   url <- "https://apisidra.ibge.gov.br/values/t/8159/n1/all/v/all/p/all"
   txt <- http_pegar(url, timeout_s = 180)
-  if (is.null(txt)) { warning("SIDRA: falha em 8159"); return(NULL) }
+  if (is.null(txt)) { warning("SIDRA: falha em 8159", immediate. = TRUE); return(NULL) }
 
   raw <- tryCatch(jsonlite::fromJSON(txt), error = function(e) NULL)
   if (is.null(raw) || nrow(raw) < 2) {
-    warning("SIDRA: 8159 sem dados"); return(NULL)
+    warning("SIDRA: 8159 sem dados", immediate. = TRUE); return(NULL)
   }
 
   rotulos <- as.character(raw[1, ])
   dados   <- as_tibble(raw[-1, , drop = FALSE])
   names(dados) <- rotulos
+
+  cat("    SIDRA 8159: linhas brutas =", nrow(dados), "\n")
+  cat("    colunas:", paste(names(dados), collapse = " | "), "\n")
 
   col_mes  <- "Mês (Código)"
   col_var  <- "Variável (Código)"
@@ -177,7 +193,14 @@ sidra_8159 <- function() {
   col_val  <- "Valor"
   col_sec  <- "Seções e atividades industriais (CNAE 2.0)"
 
-  dados |>
+  faltam <- setdiff(c(col_mes, col_var, col_vnom, col_val, col_sec), names(dados))
+  if (length(faltam) > 0) {
+    warning("SIDRA: faltam colunas: ", paste(faltam, collapse = ", "),
+            immediate. = TRUE)
+    return(NULL)
+  }
+
+  out <- dados |>
     transmute(
       data = lubridate::ymd(paste0(substr(.data[[col_mes]], 1, 4), "-",
                                    substr(.data[[col_mes]], 5, 6), "-01")) |>
@@ -189,6 +212,11 @@ sidra_8159 <- function() {
     ) |>
     drop_na(data, valor) |>
     filter(data >= INICIO_BUSCA, data <= FIM_BUSCA)
+
+  cat("    SIDRA 8159 limpo:", nrow(out), "obs\n")
+  cat("    valores únicos de v_cod:", paste(unique(out$v_cod), collapse = ", "), "\n")
+  cat("    primeiras seções:", paste(head(unique(out$secao), 5), collapse = " | "), "\n")
+  out
 }
 
 
@@ -199,7 +227,7 @@ sa_ou_nsa <- function(v_cod) {
 }
 
 
-## --- 6. Agregação mensal "fim-de-mês" --------------------------------------
+## --- 6. Agregação mensal ---------------------------------------------------
 
 mensal_fim <- function(df) {
   if (is.null(df) || nrow(df) == 0) return(df)
@@ -213,6 +241,16 @@ mensal_fim <- function(df) {
 
 
 ## --- 7. Pipeline ------------------------------------------------------------
+
+# Helper que une uma série numérica única com nome dado em formato data+nome.
+# Se a série for NULL ou vazia, retorna um tibble com a coluna nomeada vazia
+# (e a coluna 'data' presente) — assim o full_join nunca falha.
+preparar_serie <- function(d, nome_coluna) {
+  if (is.null(d) || nrow(d) == 0) {
+    return(tibble(data = as.Date(character()), !!nome_coluna := numeric()))
+  }
+  d |> rename(!!nome_coluna := valor)
+}
 
 executar <- function() {
 
@@ -231,57 +269,93 @@ sidra <- sidra_8159()
 
 ## --- 8. Painéis wide --------------------------------------------------------
 
-eua <- list(ind_prod_sa  = eua_pi_sa,
-            ind_prod_nsa = eua_pi_nsa,
-            fed_funds    = eua_juros) |>
-  imap(\(d, nome) if (is.null(d)) tibble() else
-       d |> rename(!!nome := valor)) |>
+cat("Montando painéis...\n")
+
+eua <- list(
+  preparar_serie(eua_pi_sa,  "ind_prod_sa"),
+  preparar_serie(eua_pi_nsa, "ind_prod_nsa"),
+  preparar_serie(eua_juros,  "fed_funds")
+) |>
   reduce(full_join, by = "data") |>
   arrange(data)
 
+cat("  EUA:", nrow(eua), "linhas\n")
 
-# Indústria geral (BR): filtra a seção "1 Indústria geral" e separa SA/NSA
-br_ind_geral <- sidra |>
-  filter(stringr::str_detect(
-    secao,
-    stringr::regex("ind[uú]stria geral", ignore_case = TRUE))) |>
-  mutate(tipo = sa_ou_nsa(v_cod)) |>
-  filter(tipo %in% c("SA", "NSA")) |>
-  select(data, tipo, valor) |>
-  pivot_wider(names_from = tipo, values_from = valor,
-              names_prefix = "ind_prod_") |>
-  rename_with(tolower)
+
+if (is.null(sidra) || nrow(sidra) == 0) {
+  br_ind_geral <- tibble(data = as.Date(character()),
+                         ind_prod_sa = numeric(),
+                         ind_prod_nsa = numeric())
+  br_secoes <- tibble(data = as.Date(character()),
+                      secao = character(), tipo = character(),
+                      valor = numeric())
+} else {
+  br_ind_geral <- sidra |>
+    filter(stringr::str_detect(
+      secao,
+      stringr::regex("ind[uú]stria geral", ignore_case = TRUE))) |>
+    mutate(tipo = sa_ou_nsa(v_cod)) |>
+    filter(tipo %in% c("SA", "NSA")) |>
+    select(data, tipo, valor) |>
+    pivot_wider(names_from = tipo, values_from = valor,
+                names_prefix = "ind_prod_") |>
+    rename_with(tolower)
+
+  cat("  BR indústria geral:", nrow(br_ind_geral), "linhas\n")
+
+  br_secoes <- sidra |>
+    filter(!stringr::str_detect(
+      secao,
+      stringr::regex("ind[uú]stria geral", ignore_case = TRUE))) |>
+    mutate(tipo = sa_ou_nsa(v_cod)) |>
+    filter(tipo %in% c("SA", "NSA")) |>
+    select(data, secao, tipo, valor) |>
+    arrange(data, secao, tipo)
+
+  cat("  BR seções:", nrow(br_secoes), "linhas\n")
+}
+
+# Garante que br_ind_geral tem as colunas esperadas mesmo se uma das
+# variáveis (SA ou NSA) faltou no SIDRA
+if (!"ind_prod_sa"  %in% names(br_ind_geral)) br_ind_geral$ind_prod_sa  <- NA_real_
+if (!"ind_prod_nsa" %in% names(br_ind_geral)) br_ind_geral$ind_prod_nsa <- NA_real_
 
 brasil <- br_ind_geral |>
-  full_join(br_juros |> rename(selic = valor), by = "data") |>
+  full_join(preparar_serie(br_juros, "selic"), by = "data") |>
   arrange(data)
 
-
-# Desagregação por seção CNAE (todas as seções que não são "Indústria geral")
-br_secoes <- sidra |>
-  filter(!stringr::str_detect(
-    secao,
-    stringr::regex("ind[uú]stria geral", ignore_case = TRUE))) |>
-  mutate(tipo = sa_ou_nsa(v_cod)) |>
-  filter(tipo %in% c("SA", "NSA")) |>
-  select(data, secao, tipo, valor) |>
-  arrange(data, secao, tipo)
+cat("  Brasil:", nrow(brasil), "linhas\n")
 
 
 ## --- 9. Corte para período comum --------------------------------------------
 
+primeiro_se_existe <- function(df, col) {
+  if (is.null(df) || nrow(df) == 0) return(NA)
+  if (!is.null(col)) {
+    v <- df[[col]]
+    d <- df$data[!is.na(v)]
+  } else {
+    d <- df$data
+  }
+  if (length(d) == 0) NA else min(d)
+}
+
 primeiros <- c(
-  eua_pi_sa  = if (nrow(eua_pi_sa)    > 0) min(eua_pi_sa$data)    else NA,
-  eua_pi_nsa = if (nrow(eua_pi_nsa)   > 0) min(eua_pi_nsa$data)   else NA,
-  eua_juros  = if (nrow(eua_juros)    > 0) min(eua_juros$data)    else NA,
-  br_juros   = if (nrow(br_juros)     > 0) min(br_juros$data)     else NA,
-  br_pi      = if (nrow(br_ind_geral) > 0) min(br_ind_geral$data) else NA
+  eua_pi_sa  = primeiro_se_existe(eua,    "ind_prod_sa"),
+  eua_pi_nsa = primeiro_se_existe(eua,    "ind_prod_nsa"),
+  eua_juros  = primeiro_se_existe(eua,    "fed_funds"),
+  br_juros   = primeiro_se_existe(brasil, "selic"),
+  br_pi      = primeiro_se_existe(brasil, "ind_prod_sa")
 )
 primeiros <- primeiros[!is.na(primeiros)]
-corte     <- if (length(primeiros) > 0) max(primeiros) else INICIO_BUSCA
+corte     <- if (length(primeiros) > 0) max(as.Date(primeiros, origin = "1970-01-01"))
+             else INICIO_BUSCA
 
-cat("Período comum começa em:", format(corte),
-    " (limitante:", names(primeiros)[which.max(primeiros)], ")\n")
+cat("Período comum começa em:", format(corte))
+if (length(primeiros) > 0) {
+  cat(" (limitante:", names(primeiros)[which.max(primeiros)], ")")
+}
+cat("\n")
 
 eua       <- eua       |> filter(data >= corte)
 brasil    <- brasil    |> filter(data >= corte)
@@ -292,6 +366,11 @@ br_secoes <- br_secoes |> filter(data >= corte)
 
 descritivas <- function(x) {
   x <- x[!is.na(x)]
+  if (length(x) == 0) {
+    return(tibble(n = 0L, media = NA_real_, dp = NA_real_,
+                  min = NA_real_, p25 = NA_real_, p50 = NA_real_,
+                  p75 = NA_real_, max = NA_real_))
+  }
   tibble(
     n     = length(x),
     media = mean(x),
@@ -320,6 +399,7 @@ estat <- bind_rows(
 ## --- 11. Comparação SA vs NSA -----------------------------------------------
 
 compara_sa_nsa <- function(df, rotulo_pais) {
+  if (!all(c("ind_prod_sa", "ind_prod_nsa") %in% names(df))) return(NULL)
   d <- df |> select(data, sa = ind_prod_sa, nsa = ind_prod_nsa) |>
     drop_na(sa, nsa)
   if (nrow(d) == 0) return(NULL)
@@ -347,9 +427,7 @@ compara_sa_nsa <- function(df, rotulo_pais) {
   )
 
   serie_diff <- d |>
-    mutate(diff_nivel = diff_nivel,
-           diff_pct   = diff_pct,
-           pais       = rotulo_pais)
+    mutate(diff_nivel = diff_nivel, diff_pct = diff_pct, pais = rotulo_pais)
 
   list(resumo = resumo, serie = serie_diff)
 }
@@ -392,8 +470,7 @@ linha <- function(df, col, titulo, ylab) {
 }
 
 janela_subtitulo <- function() {
-  d <- c(eua$data, brasil$data)
-  d <- d[!is.na(d)]
+  d <- c(eua$data, brasil$data); d <- d[!is.na(d)]
   if (length(d) == 0) return("")
   sprintf("Janela: %s a %s", format(min(d), "%Y-%m"), format(max(d), "%Y-%m"))
 }
@@ -414,7 +491,7 @@ ggsave(file.path(SAIDA, "painel_atividade_juros.png"),
        painel, width = 11, height = 7, dpi = 110)
 
 
-if (nrow(comparacao_serie) > 0) {
+if (!is.null(comparacao_serie) && nrow(comparacao_serie) > 0) {
   g_diff <- ggplot(comparacao_serie, aes(data, diff_nivel)) +
     geom_hline(yintercept = 0, linewidth = 0.3, color = "grey60") +
     geom_line(linewidth = 0.5, color = "#c0392b") +
